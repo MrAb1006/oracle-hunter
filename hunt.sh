@@ -103,32 +103,37 @@ fi
 # ---------------------------------------------------------------- 4. hunt
 KEYFILE=$(mktemp); printf '%s\n' "$VM_SSH_PUBKEY" | sed 's/\r$//' > "$KEYFILE"
 ADS=$(oci iam availability-domain list --output json 2>/dev/null | jq -r '.data[].name')
-CAPACITY_ERR=0; LAUNCHED=""
+LAUNCHED=""
 
-for AD in $ADS; do
-  say "trying $AD ..."
-  SOAP=$(mktemp); SERR=$(mktemp)
-  if oci compute instance launch \
-      --availability-domain "$AD" \
-      --compartment-id "$TENANCY" \
-      --subnet-id "$SUBNET" \
-      --image-id "$IMG" \
-      --shape "$SHAPE" \
-      --shape-config "{\"ocpus\":$OCPU,\"memoryInGBs\":$MEM}" \
-      --assign-public-ip true \
-      --display-name "$NAME" \
-      --ssh-authorized-keys-file "$KEYFILE" \
-      --output json >"$SOAP" 2>"$SERR"; then
-    LAUNCHED=$(jq -r '.data.id' "$SOAP" 2>/dev/null)
-    say "LAUNCHED in $AD: $LAUNCHED"
-    break
-  fi
-  if grep -qiE 'out of host capacity|out of capacity|not have enough capacity|429|TooManyRequests|500 Internal' "$SERR"; then
-    CAPACITY_ERR=$((CAPACITY_ERR+1))
-    say "no capacity in $AD (expected)"
-  else
-    say "unexpected error: $(tail -c 300 "$SERR" | tr '\n' ' ')"
-  fi
+# GitHub's cron can delay/drop scheduled runs, so each firing makes multiple
+# real launch attempts (6 tries ~= 12 min) instead of a single shot.
+for TRY in 1 2 3 4 5 6; do
+  for AD in $ADS; do
+    say "[try $TRY - ${TRIGGER:-manual}] trying $AD ..."
+    SOAP=$(mktemp); SERR=$(mktemp)
+    if oci compute instance launch \
+        --availability-domain "$AD" \
+        --compartment-id "$TENANCY" \
+        --subnet-id "$SUBNET" \
+        --image-id "$IMG" \
+        --shape "$SHAPE" \
+        --shape-config "{\"ocpus\":$OCPU,\"memoryInGBs\":$MEM}" \
+        --assign-public-ip true \
+        --display-name "$NAME" \
+        --ssh-authorized-keys-file "$KEYFILE" \
+        --output json >"$SOAP" 2>"$SERR"; then
+      LAUNCHED=$(jq -r '.data.id' "$SOAP" 2>/dev/null)
+      say "LAUNCHED in $AD: $LAUNCHED"
+      break
+    fi
+    if grep -qiE 'out of host capacity|out of capacity|not have enough capacity|429|TooManyRequests|500 Internal' "$SERR"; then
+      say "no capacity in $AD (expected)"
+    else
+      say "unexpected error: $(tail -c 300 "$SERR" | tr '\n' ' ')"
+    fi
+  done
+  [ -n "${LAUNCHED:-}" ] && break
+  [ "$TRY" -lt 6 ] && sleep 30
 done
 
 if [ -z "${LAUNCHED:-}" ]; then
