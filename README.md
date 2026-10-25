@@ -44,17 +44,20 @@ GitHub **auto-pauses scheduled workflows after 60 days of repository inactivity*
 ### Layer 1 - off-peak cron
 The workflow fires at `13,33,53 * * * *` (every 20 min at near-empty scheduler slots). Each firing still makes 6 real launch attempts (~432/day).
 
-### Layer 2 - cron-job.org (guaranteed)
-An external pinger force-dispatches the workflow, bypassing GitHub's scheduler completely:
+### Layer 2 - the Oracle VM pings GitHub itself (guaranteed, no 3rd party)
+The Riya VM (`riya-voice`, always on) runs a root cron job that force-dispatches
+this workflow every 15 minutes:
 
-- **URL:** `POST https://api.github.com/repos/MrAb1006/oracle-hunter/actions/workflows/hunt.yml/dispatches`
-- **Headers:** `Authorization: Bearer <fine-grained PAT>` + `Accept: application/vnd.github+json`
-- **Body:** `{"ref":"main"}`
-- **Interval:** every 15 min
+- `/etc/cron.d/riya-hunter` - the cron entry (runs every 15 min, ~37 s offset)
+- `/etc/riya-hunter.token` - the fine-grained PAT, root-owned `600`, scoped
+  ONLY to `oracle-hunter` with permission `Actions: Read and write`
 
-The PAT lives at `~/.cron/oracle-hunter-token.txt` locally (never in this repo). It is a fine-grained token scoped ONLY to `oracle-hunter` with permission `Actions: Read and write` - it cannot touch any other repo, including `ipo-auto`. API-triggered dispatches count as repository activity, which also keeps GitHub's own schedule alive.
+Verified live: the dispatched run appears on GitHub seconds later (HTTP 204 ->
+in_progress run). cron-job.org is no longer needed; if you ever want it as a
+back-up anyway, its API works only with account email+password (no API keys).
 
-To rotate the token: GitHub -> Settings -> Developer settings -> Fine-grained tokens -> regenerate, update the header value in cron-job.org, update the local file.
+
+To rotate the token: GitHub -> Settings -> Developer settings -> Fine-grained tokens -> regenerate, rewrite `sudo tee /etc/riya-hunter.token < new_token`; it is picked up on the next 15-min tick.
 
 ## Files
 
