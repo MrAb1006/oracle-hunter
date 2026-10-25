@@ -2,8 +2,10 @@ name: A1 hunter
 
 on:
   schedule:
-    - cron: '*/5 * * * *'   # every 5 minutes (GitHub may delay these; the
-                             # script retries internally to compensate)
+    # Off-peak minutes only: the */5 slot is so crowded that GitHub's scheduler
+    # delays/drops those runs. :13/:33/:53 fire far more reliably, and each run
+    # still makes 6 real launch attempts internally.
+    - cron: '13,33,53 * * * *'
   workflow_dispatch:          # manual trigger
 
 concurrency:
