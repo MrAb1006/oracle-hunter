@@ -1,0 +1,42 @@
+name: A1 hunter
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'   # every 5 minutes
+  workflow_dispatch:          # manual trigger
+
+concurrency:
+  group: a1-hunt
+  cancel-in-progress: false
+
+jobs:
+  hunt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Install OCI CLI
+        run: python3 -m pip install --quiet --disable-pip-version-check oci-cli
+
+      - name: Hunt for A1.Flex capacity
+        env:
+          OCI_CLI_USER: ${{ secrets.OCI_CLI_USER }}
+          OCI_CLI_TENANCY: ${{ secrets.OCI_CLI_TENANCY }}
+          OCI_CLI_FINGERPRINT: ${{ secrets.OCI_CLI_FINGERPRINT }}
+          OCI_CLI_REGION: ${{ secrets.OCI_CLI_REGION }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CLI_KEY_CONTENT }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          VM_SSH_PUBKEY: ${{ secrets.VM_SSH_PUBKEY }}
+        run: bash hunt.sh
+
+      - name: Summarize
+        if: always()
+        run: |
+          if [ -f hunt-result.json ]; then
+            cat hunt-result.json
+          else
+            echo '{"result": "no capacity"}'
+          fi
