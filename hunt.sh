@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
-# oci-hunter: grabs Always-Free A1.Flex (2 OCPU / 12 GB) the moment capacity
-# exists. Designed for GitHub Actions (public repo, free minutes).
+# oci-hunter: grabs Always-Free A1.Flex the moment capacity exists. Designed
+# for GitHub Actions (public repo, free minutes).
 #
 # Rules:
 #  - if the instance already exists            -> exit 0 (stop hunting)
 #  - if Oracle says "out of host capacity"     -> exit 0 (green; try in 5 min)
 #  - if the launch actually succeeds           -> flip svc, notify Telegram
-# Every FF action stays in the FREE tier: launches only VM.Standard.A1.Flex
-# bounded at 2 ocpu / 12 GB, Never tries PAYG shapes or larger configs.
+# Every action stays in the FREE tier: launches only VM.Standard.A1.Flex.
+# Pass 1 targets the full free shape (2 ocpu / 12 GB); if that pool is bone
+# dry, pass 2 falls back to a smaller slice (1 ocpu / 12 GB) which frees up
+# far more often. Never tries PAYG shapes or larger configs.
 
 set -uo pipefail
 
 NAME='riya-a1'
 SHAPE='VM.Standard.A1.Flex'
-OCPU=2
-MEM=12
 OS_VERSION='24.04'
 
 say() { echo "[hunt $(date -u +%H:%M:%S)] $*"; }
@@ -104,37 +104,55 @@ fi
 KEYFILE=$(mktemp); printf '%s\n' "$VM_SSH_PUBKEY" | sed 's/\r$//' > "$KEYFILE"
 ADS=$(oci iam availability-domain list --output json 2>/dev/null | jq -r '.data[].name')
 LAUNCHED=""
+TIER=""
 
 # GitHub's cron can delay/drop scheduled runs, so each firing makes multiple
-# real launch attempts (6 tries ~= 12 min) instead of a single shot.
-for TRY in 1 2 3 4 5 6; do
-  for AD in $ADS; do
-    say "[try $TRY - ${TRIGGER:-manual}] trying $AD ..."
-    SOAP=$(mktemp); SERR=$(mktemp)
-    if oci compute instance launch \
-        --availability-domain "$AD" \
-        --compartment-id "$TENANCY" \
-        --subnet-id "$SUBNET" \
-        --image-id "$IMG" \
-        --shape "$SHAPE" \
-        --shape-config "{\"ocpus\":$OCPU,\"memoryInGBs\":$MEM}" \
-        --assign-public-ip true \
-        --display-name "$NAME" \
-        --ssh-authorized-keys-file "$KEYFILE" \
-        --output json >"$SOAP" 2>"$SERR"; then
-      LAUNCHED=$(jq -r '.data.id' "$SOAP" 2>/dev/null)
-      say "LAUNCHED in $AD: $LAUNCHED"
-      break
-    fi
-    if grep -qiE 'out of host capacity|out of capacity|not have enough capacity|429|TooManyRequests|500 Internal' "$SERR"; then
-      say "no capacity in $AD (expected)"
-    else
-      say "unexpected error: $(tail -c 300 "$SERR" | tr '\n' ' ')"
-    fi
+# real launch attempts instead of a single shot. One pass = TRIES rounds x
+# every AD at a fixed shape; success fills LAUNCHED/TIER. Capacity errors are
+# expected noise; anything else is logged but non-fatal.
+hunt_shape() {
+  local O=$1 M=$2 TRIES=$3 t="" AD
+  for t in $(seq 1 "$TRIES"); do
+    for AD in $ADS; do
+      say "[try $t/$TRIES - ${TRIGGER:-manual}] $O ocpu/${M}GB in $AD ..."
+      SOAP=$(mktemp); SERR=$(mktemp)
+      if oci compute instance launch \
+          --availability-domain "$AD" \
+          --compartment-id "$TENANCY" \
+          --subnet-id "$SUBNET" \
+          --image-id "$IMG" \
+          --shape "$SHAPE" \
+          --shape-config "{\"ocpus\":$O,\"memoryInGBs\":$M}" \
+          --assign-public-ip true \
+          --display-name "$NAME" \
+          --ssh-authorized-keys-file "$KEYFILE" \
+          --output json >"$SOAP" 2>"$SERR"; then
+        LAUNCHED=$(jq -r '.data.id' "$SOAP" 2>/dev/null)
+        TIER="$O ocpu / $M GB"
+        say "LAUNCHED in $AD: $LAUNCHED ($TIER)"
+        return 0
+      fi
+      if grep -qiE 'out of host capacity|out of capacity|not have enough capacity|429|TooManyRequests|500 Internal' "$SERR"; then
+        say "no capacity in $AD (expected)"
+      else
+        say "unexpected error: $(tail -c 300 "$SERR" | tr '\n' ' ')"
+      fi
+    done
+    [ "$t" -lt "$TRIES" ] && sleep 30
   done
-  [ -n "${LAUNCHED:-}" ] && break
-  [ "$TRY" -lt 6 ] && sleep 30
-done
+  return 1
+}
+
+# pass 1: the full free shape - 6 tries
+hunt_shape 2 12 6
+
+# pass 2 (fallback): a 1-OCPU slice frees up much more often. Keeps the full
+# 12 GB RAM for the agent while using only 744 OCPU-hrs/month (half the free
+# allotment). Resize up later when capacity is warmer.
+if [ -z "${LAUNCHED:-}" ]; then
+  say "full shape unavailable everywhere - falling back to 1 ocpu / 12 GB"
+  hunt_shape 1 12 2
+fi
 
 if [ -z "${LAUNCHED:-}" ]; then
   say "RESULT: no A1 capacity anywhere (green exit, retry in 5 min)"
@@ -157,10 +175,10 @@ say "PUBLIC IP: $IP"
 if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
   curl -s "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
     -d chat_id="$TELEGRAM_CHAT_ID" -d parse_mode=HTML \
-    -d text="🎉 A1 acquired! %0ARiya A1 instance is RUNNING%0AIP: <code>${IP:-?}</code>%0ADeploy with: .\\deploy\\push.ps1 -VmHost ${IP:-?}" \
+    -d text="🎉 A1 acquired! (${TIER:-?})%0ARiya A1 instance is RUNNING%0AIP: <code>${IP:-?}</code>%0ADeploy with: .\\deploy\\push.ps1 -VmHost ${IP:-?}" \
     >/dev/null 2>&1 || say "telegram notify failed (non-fatal)"
 fi
 
-printf '{"result": "launched", "instance": "%s", "ip": "%s"}\n' "$LAUNCHED" "${IP:-?}" > hunt-result.json
+printf '{"result": "launched", "instance": "%s", "ip": "%s", "shape": "%s"}\n' "$LAUNCHED" "${IP:-?}" "${TIER:-?}" > hunt-result.json
 rm -f "$KEYFILE"
 say "done"
